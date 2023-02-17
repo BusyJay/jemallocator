@@ -17,6 +17,7 @@
 
 #![cfg_attr(feature = "alloc_trait", feature(allocator_api))]
 #![cfg_attr(feature = "alloc_trait", feature(alloc_layout_extra))]
+#![cfg_attr(feature = "alloc_trait", feature(core_intrinsics))]
 // TODO: rename the following lint on next minor bump
 #![allow(renamed_and_removed_lints)]
 #![deny(missing_docs, broken_intra_doc_links)]
@@ -144,6 +145,7 @@ mod alloc_trait_impl {
     use super::{ffi, layout_to_flags, Jemalloc};
     use core::{
         alloc::{AllocError, Allocator, Layout},
+        intrinsics::unlikely,
         ptr::{self, NonNull},
     };
     use libc::c_void;
@@ -161,19 +163,18 @@ mod alloc_trait_impl {
     unsafe impl Allocator for Jemalloc {
         #[inline]
         fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-            let size = layout.size();
-            if size != 0 {
-                let flags = layout_to_flags(layout.align(), size);
-                unsafe {
-                    let ptr = if flags == 0 {
-                        ffi::malloc(size)
-                    } else {
-                        ffi::mallocx(size, flags)
-                    };
-                    build_slice(ptr, layout.size())
-                }
-            } else {
-                unsafe { Ok(dangling_slice(layout)) }
+            if unlikely(layout.size() == 0) {
+                return unsafe { Ok(dangling_slice(layout)) };
+            }
+
+            let flags = layout_to_flags(layout.align(), layout.size());
+            unsafe {
+                let ptr = if flags == 0 {
+                    ffi::malloc(layout.size())
+                } else {
+                    ffi::mallocx(layout.size(), flags)
+                };
+                build_slice(ptr, layout.size())
             }
         }
 
@@ -187,18 +188,18 @@ mod alloc_trait_impl {
 
         #[inline]
         fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-            if layout.size() != 0 {
-                let flags = layout_to_flags(layout.align(), layout.size());
-                unsafe {
-                    let ptr = if flags == 0 {
-                        ffi::calloc(1, layout.size())
-                    } else {
-                        ffi::mallocx(layout.size(), flags | ffi::MALLOCX_ZERO)
-                    };
-                    build_slice(ptr, layout.size())
-                }
-            } else {
-                unsafe { Ok(dangling_slice(layout)) }
+            if unlikely(layout.size() == 0) {
+                return unsafe { Ok(dangling_slice(layout)) };
+            }
+
+            let flags = layout_to_flags(layout.align(), layout.size());
+            unsafe {
+                let ptr = if flags == 0 {
+                    ffi::calloc(1, layout.size())
+                } else {
+                    ffi::mallocx(layout.size(), flags | ffi::MALLOCX_ZERO)
+                };
+                build_slice(ptr, layout.size())
             }
         }
 
@@ -209,32 +210,31 @@ mod alloc_trait_impl {
             old_layout: Layout,
             new_layout: Layout,
         ) -> Result<NonNull<[u8]>, AllocError> {
-            if old_layout.size() != 0 {
-                if new_layout.size() != 0 {
-                    if new_layout.align() == old_layout.align() {
-                        let flags = layout_to_flags(new_layout.align(), new_layout.size());
-                        let ptr = if flags == 0 {
-                            ffi::realloc(ptr.as_ptr() as *mut c_void, new_layout.size())
-                        } else {
-                            ffi::rallocx(ptr.as_ptr() as *mut c_void, new_layout.size(), flags)
-                        };
-                        build_slice(ptr, new_layout.size())
-                    } else {
-                        let mut new_ptr = self.allocate(new_layout)?;
-                        ptr::copy_nonoverlapping(
-                            ptr.as_ptr(),
-                            new_ptr.as_mut().as_mut_ptr(),
-                            old_layout.size(),
-                        );
-                        self.deallocate(ptr, old_layout);
-                        Ok(new_ptr)
-                    }
+            if unlikely(old_layout.size() == 0) {
+                return self.allocate(new_layout);
+            }
+            if unlikely(new_layout.size() == 0) {
+                self.deallocate(ptr, old_layout);
+                return Ok(dangling_slice(new_layout));
+            }
+
+            if new_layout.align() == old_layout.align() {
+                let flags = layout_to_flags(new_layout.align(), new_layout.size());
+                let ptr = if flags == 0 {
+                    ffi::realloc(ptr.as_ptr() as *mut c_void, new_layout.size())
                 } else {
-                    self.deallocate(ptr, old_layout);
-                    Ok(dangling_slice(new_layout))
-                }
+                    ffi::rallocx(ptr.as_ptr() as *mut c_void, new_layout.size(), flags)
+                };
+                build_slice(ptr, new_layout.size())
             } else {
-                self.allocate(new_layout)
+                let mut new_ptr = self.allocate(new_layout)?;
+                ptr::copy_nonoverlapping(
+                    ptr.as_ptr(),
+                    new_ptr.as_mut().as_mut_ptr(),
+                    old_layout.size(),
+                );
+                self.deallocate(ptr, old_layout);
+                Ok(new_ptr)
             }
         }
 
@@ -245,32 +245,31 @@ mod alloc_trait_impl {
             old_layout: Layout,
             new_layout: Layout,
         ) -> Result<NonNull<[u8]>, AllocError> {
-            if old_layout.size() != 0 {
-                if new_layout.size() != 0 {
-                    if new_layout.align() == old_layout.align() {
-                        let flags = layout_to_flags(new_layout.align(), new_layout.size());
-                        let ptr = ffi::rallocx(
-                            ptr.as_ptr() as *mut c_void,
-                            new_layout.size(),
-                            flags | ffi::MALLOCX_ZERO,
-                        );
-                        build_slice(ptr, new_layout.size())
-                    } else {
-                        let mut new_ptr = self.allocate_zeroed(new_layout)?;
-                        ptr::copy_nonoverlapping(
-                            ptr.as_ptr(),
-                            new_ptr.as_mut().as_mut_ptr(),
-                            old_layout.size(),
-                        );
-                        self.deallocate(ptr, old_layout);
-                        Ok(new_ptr)
-                    }
-                } else {
-                    self.deallocate(ptr, old_layout);
-                    Ok(dangling_slice(new_layout))
-                }
+            if unlikely(old_layout.size() == 0) {
+                return self.allocate_zeroed(new_layout);
+            }
+            if unlikely(new_layout.size() == 0) {
+                self.deallocate(ptr, old_layout);
+                return Ok(dangling_slice(new_layout));
+            }
+
+            if new_layout.align() == old_layout.align() {
+                let flags = layout_to_flags(new_layout.align(), new_layout.size());
+                let ptr = ffi::rallocx(
+                    ptr.as_ptr() as *mut c_void,
+                    new_layout.size(),
+                    flags | ffi::MALLOCX_ZERO,
+                );
+                build_slice(ptr, new_layout.size())
             } else {
-                self.allocate_zeroed(new_layout)
+                let mut new_ptr = self.allocate_zeroed(new_layout)?;
+                ptr::copy_nonoverlapping(
+                    ptr.as_ptr(),
+                    new_ptr.as_mut().as_mut_ptr(),
+                    old_layout.size(),
+                );
+                self.deallocate(ptr, old_layout);
+                Ok(new_ptr)
             }
         }
 
@@ -281,32 +280,31 @@ mod alloc_trait_impl {
             old_layout: Layout,
             new_layout: Layout,
         ) -> Result<NonNull<[u8]>, AllocError> {
-            if old_layout.size() != 0 {
-                if new_layout.size() != 0 {
-                    if new_layout.align() == old_layout.align() {
-                        let flags = layout_to_flags(new_layout.align(), new_layout.size());
-                        let ptr = if flags == 0 {
-                            ffi::realloc(ptr.as_ptr() as *mut c_void, new_layout.size())
-                        } else {
-                            ffi::rallocx(ptr.as_ptr() as *mut c_void, new_layout.size(), flags)
-                        };
-                        build_slice(ptr, new_layout.size())
-                    } else {
-                        let mut new_ptr = self.allocate(new_layout)?;
-                        ptr::copy_nonoverlapping(
-                            ptr.as_ptr(),
-                            new_ptr.as_mut().as_mut_ptr(),
-                            new_layout.size(),
-                        );
-                        self.deallocate(ptr, old_layout);
-                        Ok(new_ptr)
-                    }
+            if unlikely(old_layout.size() == 0) {
+                return Ok(dangling_slice(new_layout));
+            }
+            if unlikely(new_layout.size() == 0) {
+                self.deallocate(ptr, old_layout);
+                return Ok(dangling_slice(new_layout));
+            }
+
+            if new_layout.align() == old_layout.align() {
+                let flags = layout_to_flags(new_layout.align(), new_layout.size());
+                let ptr = if flags == 0 {
+                    ffi::realloc(ptr.as_ptr() as *mut c_void, new_layout.size())
                 } else {
-                    self.deallocate(ptr, old_layout);
-                    Ok(dangling_slice(new_layout))
-                }
+                    ffi::rallocx(ptr.as_ptr() as *mut c_void, new_layout.size(), flags)
+                };
+                build_slice(ptr, new_layout.size())
             } else {
-                Ok(dangling_slice(new_layout))
+                let mut new_ptr = self.allocate(new_layout)?;
+                ptr::copy_nonoverlapping(
+                    ptr.as_ptr(),
+                    new_ptr.as_mut().as_mut_ptr(),
+                    new_layout.size(),
+                );
+                self.deallocate(ptr, old_layout);
+                Ok(new_ptr)
             }
         }
     }
