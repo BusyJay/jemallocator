@@ -144,16 +144,11 @@ unsafe impl GlobalAlloc for Jemalloc {
 mod alloc_trait_impl {
     use super::{ffi, layout_to_flags, Jemalloc};
     use core::{
-        alloc::{AllocError, Allocator, Layout},
+        alloc::{AllocError, Allocator, GlobalAlloc, Layout},
         intrinsics::unlikely,
         ptr::{self, NonNull},
     };
     use libc::c_void;
-
-    #[inline]
-    fn build_slice(ptr: *mut c_void, size: usize) -> Result<NonNull<[u8]>, AllocError> {
-        NonNull::new(ptr::slice_from_raw_parts_mut(ptr as *mut u8, size)).ok_or(AllocError)
-    }
 
     #[inline]
     unsafe fn dangling_slice(layout: Layout) -> NonNull<[u8]> {
@@ -163,18 +158,13 @@ mod alloc_trait_impl {
     unsafe impl Allocator for Jemalloc {
         #[inline]
         fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-            if unlikely(layout.size() == 0) {
-                return unsafe { Ok(dangling_slice(layout)) };
-            }
-
-            let flags = layout_to_flags(layout.align(), layout.size());
             unsafe {
-                let ptr = if flags == 0 {
-                    ffi::malloc(layout.size())
+                let ptr = if layout.size() != 0 {
+                    Jemalloc.alloc(layout)
                 } else {
-                    ffi::mallocx(layout.size(), flags)
+                    layout.dangling().as_ptr()
                 };
-                build_slice(ptr, layout.size())
+                NonNull::new(ptr::slice_from_raw_parts_mut(ptr, layout.size())).ok_or(AllocError)
             }
         }
 
@@ -188,18 +178,13 @@ mod alloc_trait_impl {
 
         #[inline]
         fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-            if unlikely(layout.size() == 0) {
-                return unsafe { Ok(dangling_slice(layout)) };
-            }
-
-            let flags = layout_to_flags(layout.align(), layout.size());
             unsafe {
-                let ptr = if flags == 0 {
-                    ffi::calloc(1, layout.size())
+                let ptr = if layout.size() != 0 {
+                    Jemalloc.alloc_zeroed(layout)
                 } else {
-                    ffi::mallocx(layout.size(), flags | ffi::MALLOCX_ZERO)
+                    layout.dangling().as_ptr()
                 };
-                build_slice(ptr, layout.size())
+                NonNull::new(ptr::slice_from_raw_parts_mut(ptr, layout.size())).ok_or(AllocError)
             }
         }
 
@@ -219,13 +204,9 @@ mod alloc_trait_impl {
             }
 
             if new_layout.align() == old_layout.align() {
-                let flags = layout_to_flags(new_layout.align(), new_layout.size());
-                let ptr = if flags == 0 {
-                    ffi::realloc(ptr.as_ptr() as *mut c_void, new_layout.size())
-                } else {
-                    ffi::rallocx(ptr.as_ptr() as *mut c_void, new_layout.size(), flags)
-                };
-                build_slice(ptr, new_layout.size())
+                let ptr = Jemalloc.realloc(ptr.as_ptr(), old_layout, new_layout.size());
+                NonNull::new(ptr::slice_from_raw_parts_mut(ptr, new_layout.size()))
+                    .ok_or(AllocError)
             } else {
                 let mut new_ptr = self.allocate(new_layout)?;
                 ptr::copy_nonoverlapping(
@@ -260,7 +241,11 @@ mod alloc_trait_impl {
                     new_layout.size(),
                     flags | ffi::MALLOCX_ZERO,
                 );
-                build_slice(ptr, new_layout.size())
+                NonNull::new(ptr::slice_from_raw_parts_mut(
+                    ptr as *mut u8,
+                    new_layout.size(),
+                ))
+                .ok_or(AllocError)
             } else {
                 let mut new_ptr = self.allocate_zeroed(new_layout)?;
                 ptr::copy_nonoverlapping(
@@ -289,13 +274,9 @@ mod alloc_trait_impl {
             }
 
             if new_layout.align() == old_layout.align() {
-                let flags = layout_to_flags(new_layout.align(), new_layout.size());
-                let ptr = if flags == 0 {
-                    ffi::realloc(ptr.as_ptr() as *mut c_void, new_layout.size())
-                } else {
-                    ffi::rallocx(ptr.as_ptr() as *mut c_void, new_layout.size(), flags)
-                };
-                build_slice(ptr, new_layout.size())
+                let ptr = Jemalloc.realloc(ptr.as_ptr(), old_layout, new_layout.size());
+                NonNull::new(ptr::slice_from_raw_parts_mut(ptr, new_layout.size()))
+                    .ok_or(AllocError)
             } else {
                 let mut new_ptr = self.allocate(new_layout)?;
                 ptr::copy_nonoverlapping(
