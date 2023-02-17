@@ -1,18 +1,22 @@
 //! Benchmarks the cost of the different allocation functions by doing a
 //! roundtrip (allocate, deallocate).
 #![feature(test, allocator_api)]
+#![feature(slice_ptr_get)]
 #![cfg(feature = "alloc_trait")]
 
 extern crate test;
 
+use tikv_jemalloc_sys as jemalloc_sys;
+use tikv_jemallocator as jemallocator;
+
+use jemalloc_sys::MALLOCX_ALIGN;
 use jemallocator::Jemalloc;
 use libc::c_int;
 use std::{
-    alloc::{Alloc, Excess, Layout},
+    alloc::{Allocator, Layout},
     ptr,
 };
 use test::Bencher;
-use tikv_jemalloc_sys::MALLOCX_ALIGN;
 
 #[global_allocator]
 static A: Jemalloc = Jemalloc;
@@ -77,9 +81,9 @@ macro_rules! rt {
             fn [<rt_alloc_layout_checked_size_ $size _align_ $align>](b: &mut Bencher) {
                 b.iter(|| unsafe {
                     let layout = Layout::from_size_align($size, $align).unwrap();
-                    let ptr = Jemalloc.alloc(layout.clone()).unwrap();
+                    let ptr = A.allocate(layout).unwrap();
                     test::black_box(ptr);
-                    Jemalloc.dealloc(ptr, layout);
+                    A.deallocate(ptr.as_non_null_ptr(), layout);
                 });
             }
 
@@ -87,30 +91,9 @@ macro_rules! rt {
             fn [<rt_alloc_layout_unchecked_size_ $size _align_ $align>](b: &mut Bencher) {
                 b.iter(|| unsafe {
                     let layout = Layout::from_size_align_unchecked($size, $align);
-                    let ptr = Jemalloc.alloc(layout.clone()).unwrap();
+                    let ptr = A.allocate(layout.clone()).unwrap();
                     test::black_box(ptr);
-                    Jemalloc.dealloc(ptr, layout);
-                });
-            }
-
-            #[bench]
-            fn [<rt_alloc_excess_unused_size_ $size _align_ $align>](b: &mut Bencher) {
-                b.iter(|| unsafe {
-                    let layout = Layout::from_size_align($size, $align).unwrap();
-                    let Excess(ptr, _) = Jemalloc.alloc_excess(layout.clone()).unwrap();
-                    test::black_box(ptr);
-                    Jemalloc.dealloc(ptr, layout);
-                });
-            }
-
-            #[bench]
-            fn [<rt_alloc_excess_used_size_ $size _align_ $align>](b: &mut Bencher) {
-                b.iter(|| unsafe {
-                    let layout = Layout::from_size_align($size, $align).unwrap();
-                    let Excess(ptr, excess) = Jemalloc.alloc_excess(layout.clone()).unwrap();
-                    test::black_box(ptr);
-                    test::black_box(excess);
-                    Jemalloc.dealloc(ptr, layout);
+                    A.deallocate(ptr.as_non_null_ptr(), layout);
                 });
             }
 
@@ -141,20 +124,20 @@ macro_rules! rt {
             fn [<rt_realloc_naive_size_ $size _align_ $align>](b: &mut Bencher) {
                 b.iter(|| unsafe {
                     let layout = Layout::from_size_align($size, $align).unwrap();
-                    let ptr = Jemalloc.alloc(layout.clone()).unwrap();
+                    let ptr = A.allocate(layout.clone()).unwrap();
                     test::black_box(ptr);
 
                     // navie realloc:
                     let new_layout = Layout::from_size_align(2 * $size, $align).unwrap();
                     let ptr = {
-                        let new_ptr = Jemalloc.alloc(new_layout.clone()).unwrap();
-                        ptr::copy_nonoverlapping(ptr.as_ptr() as *const u8, new_ptr.as_ptr(), layout.size());
-                        Jemalloc.dealloc(ptr, layout);
+                        let new_ptr = A.allocate(new_layout.clone()).unwrap();
+                        ptr::copy_nonoverlapping(ptr.as_mut_ptr(), new_ptr.as_mut_ptr(), layout.size());
+                        A.deallocate(ptr.as_non_null_ptr(), layout);
                         new_ptr
                     };
                     test::black_box(ptr);
 
-                    Jemalloc.dealloc(ptr, new_layout);
+                    A.deallocate(ptr.as_non_null_ptr(), new_layout);
                 });
             }
 
@@ -162,52 +145,16 @@ macro_rules! rt {
             fn [<rt_realloc_size_ $size _align_ $align>](b: &mut Bencher) {
                 b.iter(|| unsafe {
                     let layout = Layout::from_size_align($size, $align).unwrap();
-                    let ptr = Jemalloc.alloc(layout.clone()).unwrap();
+                    let ptr = A.allocate(layout.clone()).unwrap();
                     test::black_box(ptr);
 
                     let new_layout = Layout::from_size_align(2 * $size, $align).unwrap();
-                    let ptr = Jemalloc.realloc(ptr, layout, new_layout.size()).unwrap();
+                    let ptr = A.grow(ptr.as_non_null_ptr(), layout, new_layout).unwrap();
                     test::black_box(ptr);
 
-                    Jemalloc.dealloc(ptr, new_layout);
+                    A.deallocate(ptr.as_non_null_ptr(), new_layout);
                 });
             }
-
-            #[bench]
-            fn [<rt_realloc_excess_unused_size_ $size _align_ $align>](b: &mut Bencher) {
-                b.iter(|| unsafe {
-                    let layout = Layout::from_size_align($size, $align).unwrap();
-                    let ptr = Jemalloc.alloc(layout.clone()).unwrap();
-                    test::black_box(ptr);
-
-                    let new_layout = Layout::from_size_align(2 * $size, $align).unwrap();
-                    let Excess(ptr, _) = Jemalloc
-                        .realloc_excess(ptr, layout, new_layout.size())
-                        .unwrap();
-                    test::black_box(ptr);
-
-                    Jemalloc.dealloc(ptr, new_layout);
-                });
-            }
-
-            #[bench]
-            fn [<rt_realloc_excess_used_size_ $size _align_ $align>](b: &mut Bencher) {
-                b.iter(|| unsafe {
-                    let layout = Layout::from_size_align($size, $align).unwrap();
-                    let ptr = Jemalloc.alloc(layout.clone()).unwrap();
-                    test::black_box(ptr);
-
-                    let new_layout = Layout::from_size_align(2 * $size, $align).unwrap();
-                    let Excess(ptr, excess) = Jemalloc
-                        .realloc_excess(ptr, layout, new_layout.size())
-                        .unwrap();
-                    test::black_box(ptr);
-                    test::black_box(excess);
-
-                    Jemalloc.dealloc(ptr, new_layout);
-                });
-            }
-
         }
     };
     ([$($size:expr),*]) => {

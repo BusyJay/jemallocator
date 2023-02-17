@@ -71,7 +71,7 @@ jobs:
       with:
         submodules: true
     - run: rustup default nightly
-    - run: cargo test --bench roundtrip
+    - run: cargo test --bench roundtrip --features alloc_trait
   check:
     name: Rustfmt and Clippy
     runs-on: ubuntu-latest
