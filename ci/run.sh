@@ -24,6 +24,12 @@ else
     export JEMALLOC_SYS_RUN_JEMALLOC_TESTS=1
 fi
 
+
+if [ "${TRAVIS_RUST_VERSION}" = "nightly"  ] && [ "${TARGET}" = "x86_64-unknown-linux-gnu" ]
+then
+    export RUSTFLAGS="$RUSTFLAGS -Z sanitizer=address"
+fi
+
 cargo build --target "${TARGET}"
 cargo test --target "${TARGET}"
 cargo test --target "${TARGET}" --features profiling
@@ -74,5 +80,5 @@ cargo test --target "${TARGET}" \
 if [ "${TRAVIS_RUST_VERSION}" = "nightly"  ]
 then
     # The Alloc trait is unstable:
-    ${CARGO_CMD} test --target "${TARGET}" --features alloc_trait
+    cargo test --target "${TARGET}" --features alloc_trait
 fi
