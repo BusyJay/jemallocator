@@ -74,7 +74,8 @@ fn shrink_in_place() {
 fn basic() {
     use std::{
         alloc::{Allocator, Layout},
-        ptr::NonNull,
+        cmp,
+        ptr::{self, NonNull},
     };
 
     unsafe {
@@ -106,6 +107,8 @@ fn basic() {
                         );
                         let origin_ptr = NonNull::new(res.as_mut().as_mut_ptr()).unwrap();
 
+                        ptr::write_bytes(origin_ptr.as_ptr(), 0x42, *origin_size);
+
                         let new_l = Layout::from_size_align(*new_size, *new_align).unwrap();
                         let mut res = if new_size > origin_size {
                             allocator.grow(origin_ptr, origin_l, new_l).unwrap()
@@ -117,6 +120,14 @@ fn basic() {
                         assert_eq!(
                             res.as_ref().as_ptr().align_offset(*new_align),
                             0,
+                            "{}",
+                            tag()
+                        );
+                        assert!(
+                            res.as_ref()
+                                .iter()
+                                .take(cmp::min(*origin_size, *new_size))
+                                .all(|x| *x == 0x42),
                             "{}",
                             tag()
                         );
@@ -135,6 +146,7 @@ fn basic() {
                         );
                         assert!(res.as_ref().iter().all(|&x| x == 0), "{}", tag());
                         let origin_ptr = NonNull::new(res.as_mut().as_mut_ptr()).unwrap();
+                        ptr::write_bytes(origin_ptr.as_ptr(), 0x42, *origin_size);
 
                         let new_l = Layout::from_size_align(*new_size, *new_align).unwrap();
                         let mut res = if new_size > origin_size {
@@ -149,21 +161,28 @@ fn basic() {
                             "{}",
                             tag()
                         );
-                        assert!(res.as_ref().iter().all(|&x| x == 0), "{}", tag());
+                        assert!(
+                            res.as_ref()
+                                .iter()
+                                .take(cmp::min(*origin_size, *new_size))
+                                .all(|x| *x == 0x42),
+                            "{}",
+                            tag()
+                        );
+                        assert!(
+                            res.as_ref()
+                                .iter()
+                                .skip(cmp::min(*origin_size, *new_size))
+                                .all(|x| *x == 0),
+                            "{}",
+                            tag()
+                        );
+
                         let new_ptr = NonNull::new(res.as_mut().as_mut_ptr()).unwrap();
                         allocator.deallocate(new_ptr, new_l);
                     }
                 }
             }
-        }
-
-        for align in [1, 2, 4, 8, 16, 32] {
-            let l = Layout::from_size_align(0, align).unwrap();
-            let mut res = allocator.allocate(l).unwrap();
-            assert_eq!(res.as_ref().len(), 0, "align: {}", align);
-            let ptr = NonNull::new(res.as_mut().as_mut_ptr()).unwrap();
-            assert_eq!(ptr.as_ptr().align_offset(align), 0, "align: {}", align);
-            allocator.deallocate(ptr, l);
         }
     }
 }
